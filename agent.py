@@ -1,10 +1,32 @@
 
-from transformers import pipeline
+from transformers import StoppingCriteriaList, StoppingCriteria, StoppingCriteriaList
+import torch
+
+
+class StoppingCriteriaSub(StoppingCriteria):
+
+    def __init__(self, stops = [], encounters=1):
+        super().__init__()
+        self.stops = [stop.to("cuda") for stop in stops]
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor):
+        for stop in self.stops:
+            if torch.all((stop == input_ids[0][-len(stop):])).item():
+                return True
+
+        return False
+
+
 
 class Agent:
-    def __init__(self, model_name, tools):
-        self.pipe = pipeline(name  = model_name ,  device_map="auto")
+    def __init__(self, model, tokenizer, tools):
+
+        self.model = model
+        self.tokenizer = tokenizer
         self.tools = tools
+        stop_words = self.get_stop_token()
+        stop_words_ids = [self.tokenizer(stop_word, return_tensors='pt', add_special_tokens = False )['input_ids'].squeeze() for stop_word in stop_words]
+        self.stopping_criteria = StoppingCriteriaList([StoppingCriteriaSub(stops=stop_words_ids)])
         
     def detect_tool(self, message):
         """
@@ -29,21 +51,21 @@ class Agent:
         return latest_id
 
 
-    def _update_kwargs(self, genkwargs):
+    def get_stop_token(self):
         list_end_gen = []
         for tool in self.tools:
             list_end_gen.append(tool.end_token)
-        return genkwargs.update({'eos_token': list_end_gen})
+        return list_end_gen
     
 
-    def generate(self, message, **kwargs):
-        self.kwargs = self._update_kwargs(self.tools)
-        while True:
-            output = self.pipe( message , **kwargs)[0]['generated_text']
-            print(output)
+    def generate(self, question, **kwargs):
+        message = [{'role': 'user', 'content': question}]
+        inputs = self.tokenizer.apply_chat_template(message, tokenize=True, add_generation_prompt=True, return_tensors="pt")
+        for i in range(4):
+            output = self.model.generate( inputs.to(self.model.device), stopping_criteria=self.stopping_criteria, **kwargs)
+            output = self.tokenizer.batch_decode(output)[0]
             tool_id = self.detect_tool(output)
             if tool_id is not None:
-                output = self.tools[tool_id](output)
-            else:
-                break
+                inputs = self.tools[tool_id](output)
+                inputs = self.tokenizer(inputs, return_tensors = 'pt', add_special_tokens = False)['input_ids'] 
         return output
